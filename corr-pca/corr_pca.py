@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LinearRegression
@@ -74,18 +75,26 @@ def corr_pca_lag_0(X, y_id, lag_num, corr_filter):
     return X_lag_result
 
 
-def clean_data(df):
+def clean_data(df, y_id):
+
+    # 将房价2010的数据用S2707403的数据补齐
+    col_new = 'S2707411'
+    df.loc['2010', col_new] = [12.83, 14.87, 11.97, 9.17]
+
     # 保留空值少于70%的列
     to_drop = df.columns[df.isnull().mean() > .7]
     print('以下列将被去除，因为它们的空值超过70%: {}'.format(to_drop))
     df = df.drop(to_drop, axis=1)
 
+    df_y = df.loc[:, [y_id]]
+    df.drop(y_id, axis=1, inplace=True)
     # 去除第一行为空值的列，因为X已经是根据起始/结束日期选出的数据
     to_drop = df.columns[df.iloc[0].isnull()]
     print('以下列将被去除，因为它们的第一行为空值: {}'.format(to_drop))
     print('第一行数据: {}'.format(df.head(1)))
     df = df.drop(to_drop, axis=1)
 
+    df[y_id] = df_y
     print('清理后的数据前3行: {}'.format(df.head(3)))
     return df
 
@@ -130,12 +139,23 @@ def corr_pca_lag(df_x, df_y, y_id, lag_num, corr_filter):
 
     for feature in corr[corr[0] <= -corr_filter]['index']:
         df_x_calc[feature] *= -1
-        # df_x[feature] *= -1
+        df_x[feature] *= -1
 
-    df_x_std = StandardScaler().fit_transform(df_x_calc)
     pca = PCA(n_components=1)
-    pca.fit_transform(df_x_std)
-    pca_lag = pd.DataFrame(pca.components_, columns=df_x_calc.columns)
+
+    pca_lag = None
+    while True:
+        df_x_std = StandardScaler().fit_transform(df_x_calc)
+        pca.fit_transform(df_x_std)
+        pca_lag = pd.DataFrame(pca.components_, columns=df_x_calc.columns)
+
+        pca_lag_t = pca_lag.T
+        cols_to_drop = [e for e in pca_lag_t[pca_lag_t[0] <= 0].index]
+        if not cols_to_drop:
+            break
+        print('以下列将被删除，因为他们的pca系数小于零: {}'.format(cols_to_drop))
+        df_x_calc.drop(cols_to_drop, axis=1, inplace=True)
+        df_x.drop(cols_to_drop, axis=1, inplace=True)
 
     print('Y: {}, lag: {}, pca贡献度: {}'.format(y_id, lag_num, pca.explained_variance_ratio_))
     print('pca系数: {}'.format(pca_lag))
@@ -162,7 +182,7 @@ def corr_pca_lag(df_x, df_y, y_id, lag_num, corr_filter):
 
 def corr_pca(df, start_month, end_month, y_id, corr_filter):
     df = df[start_month:end_month]
-    df = clean_data(df)
+    df = clean_data(df, y_id)
 
     def helper(lag_num):
         df_x, df_y = preprocess(df, y_id, lag_num)
@@ -201,7 +221,7 @@ def calc_reg_lag(df_y, y_id, lag_list):
     df_y_keep = df_y.loc[:, columns]
     df_y_keep = df_y_keep.loc[~df_y_keep.isnull().sum(axis=1).astype(bool)]
     print('用来预测的Y: {}'.format(df_y_keep))
-    df_y_reg = df_y.loc[:, [y_full_id]]
+    df_y_reg = df_y.copy()
     y_reg_name = 'Y_{}_reg_{}'.format(y_id, ''.join(map(str, lag_list)))
     df_y_reg[y_reg_name] = pd.DataFrame(linear_regressor.predict(df_y_keep), index=df_y_keep.index)
     print('线性回归之后的Y: {}'.format(df_y_reg))
@@ -218,32 +238,45 @@ def calc_reg_lag(df_y, y_id, lag_list):
 
 def calc_reg(df_y, y_id):
     result = pd.concat([calc_reg_lag(df_y, y_id, lag_list)
-                        for lag_list in ([1, 2, 3, 4], [2, 3, 4], [3, 4])], axis=1)
-    return result.loc[:, ~result.columns.duplicated()]
+                        for lag_list in ([1, 2, 3, 4], [2, 3, 4], [3, 4], [4])], axis=1)
+    result = result.loc[:, ~result.columns.duplicated()]
+    print(result.head(3))
+    col_name = 'Y_{}_merged'.format(y_id)
+    result.loc[:, col_name] = np.nan
+
+    for col in ['Y_{}_reg_{}'.format(y_id, lag) for lag in ('4', '34', '234', '1234')]:
+        result.loc[~result[col].isnull(), col_name] = result[col]
+
+    return result
 
 
-def draw_plot(df):
+def draw_plot(df, y_id):
     x = df.index
-    y = df['Y_M5567876']
-    y1 = df['Y_lag1_M5567876']
-    y2 = df['Y_lag2_M5567876']
-    y3 = df['Y_lag3_M5567876']
-    y4 = df['Y_lag4_M5567876']
+    y = df['Y_' + y_id]
+    y_std = df['Y_{}_std'.format(y_id)]
+    y_id_fmt = 'Y_lag{}_{}'
+    y1 = df[y_id_fmt.format(1, y_id)]
+    y2 = df[y_id_fmt.format(2, y_id)]
+    y3 = df[y_id_fmt.format(3, y_id)]
+    y4 = df[y_id_fmt.format(4, y_id)]
+    y_merged = df['Y_{}_merged'.format(y_id)]
 
     # Plot y1 vs x in blue on the left vertical axis.
-    plt.xlabel("date")
-    plt.ylabel("", color="b")
-    plt.tick_params(axis="y", labelcolor="b")
-    plt.plot(x, y, "b-", linewidth=2)
-
-    # Plot y2 vs x in red on the right vertical axis.
-    plt.twinx()
-    plt.ylabel("", color="r")
-    plt.tick_params(axis="y", labelcolor="r")
-    plt.plot(x, y1, "r-", linewidth=2)
-    plt.plot(x, y2, "r-", linewidth=2)
-    plt.plot(x, y3, "r-", linewidth=2)
-    plt.plot(x, y4, "r-", linewidth=2)
+    # plt.xlabel("date")
+    # plt.ylabel("", color="b")
+    # plt.tick_params(axis="y", labelcolor="b")
+    # plt.plot(x, y, "b-", linewidth=2)
+    plt.plot(x, y_std, "b-", linewidth=2)
+    #
+    # # Plot y2 vs x in red on the right vertical axis.
+    # plt.twinx()
+    # plt.ylabel("", color="r")
+    # plt.tick_params(axis="y", labelcolor="r")
+    plt.plot(x, y1, "g-", linewidth=1)
+    plt.plot(x, y2, "g-", linewidth=1)
+    plt.plot(x, y3, "g-", linewidth=1)
+    plt.plot(x, y4, "y-", linewidth=2)
+    # plt.plot(x, y_merged, "r-", linewidth=2)
     plt.show()
 
 
@@ -254,10 +287,10 @@ X_orig.drop('指标ID', axis=1, inplace=True)
 X_orig.drop('S0033812', axis=1, inplace=True)  # S0033812有多个空值
 
 Y_IDS = [
-    'M5567876',
+    # 'M5567876',
     # 'M0001548_M5567876',
-    # 'M1000216',
-    # 'S2707411',
+    # # 'M1000216',
+    'S2707411',
     # 'M0010049',
 ]
 
@@ -268,13 +301,13 @@ for y_id in Y_IDS:
         X[y_id] = X[y1_id] / X[y2_id]
         X.drop(y1_id, axis=1, inplace=True)
         X.drop(y2_id, axis=1, inplace=True)
-    df_y = corr_pca(X, '2011-03', '2018-12', y_id, 0.6)
+    df_y = corr_pca(X, '2010-03', '2018-12', y_id, 0.6)
     print('Y: {}, lag1234合并结果: {}'.format(y_id, df_y.head(3)))
 
     df_y_reg = calc_reg(df_y, y_id)
     df_y = pd.concat([df_y, df_y_reg], axis=1)
     df_y = df_y.loc[:, ~df_y.columns.duplicated()]
-    print('Y: {}, 线性回归后的Y: {}'.format(y_id, df_y.head(3)))
+    print('Y: {}, 线性回归后的Y: {}'.format(y_id, df_y))
     y_name = 'Y_' + y_id
     df_y.loc[:, ~df_y.columns.duplicated()].to_csv('./{}.csv'.format(y_name))
-    draw_plot(df_y)
+    draw_plot(df_y, y_id)
