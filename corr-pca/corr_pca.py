@@ -13,73 +13,7 @@ pd.set_option('display.width', 10000)
 pd.set_option('display.max_columns', 10000)
 
 
-# 没有用到的老版本
-def corr_pca_lag_0(X, y_id, lag_num, corr_filter):
-    # 将X下移lag_num
-    X_lag = X.shift(lag_num)
-
-    # 保留空值少于70%的列
-    X_lag = X_lag.loc[:, X_lag.isnull().mean() < .7]
-
-    # 去除2011-03为空值的列
-    X_lag.drop(X_lag.columns[X_lag['2011-03'].isnull().sum().astype(bool)],
-               axis=1, inplace=True)
-
-    y_name = 'Y_lag{}_{}'.format(lag_num, y_id)
-    # 去掉移过的Y
-    X_lag_Y = X_lag.drop(y_id, axis=1)
-    # 拼上未移动过的Y
-    X_lag_Y[y_name] = X[y_id]
-
-    # 只保留行中没有空值的行
-    X_lag_Y = X_lag_Y.loc[~X_lag.isnull().sum(axis=1).astype(bool)]
-
-    Y = X_lag_Y[y_name]
-    X_lag = X_lag_Y.drop(y_name, axis=1)
-    print('计算相关性之前的X_lag（头3行）: {}'.format(X_lag.head(3)))
-
-    corr = X_lag.corrwith(Y)
-    corr = corr.reset_index()
-
-    # 去掉相关性绝对值小于corr_filter（比如：0.6）的指标
-    corr_to_drop = corr[abs(corr[0]) < corr_filter]
-    X_lag.drop(corr_to_drop['index'], axis=1, inplace=True)
-
-    for feature in corr[corr[0] <= -corr_filter]['index']:
-        X_lag[feature] *= -1
-
-    X_lag_std = StandardScaler().fit_transform(X_lag)
-    pca = PCA(n_components=1)
-    pca.fit_transform(X_lag_std)
-    pca_lag = pd.DataFrame(pca.components_, columns=X_lag.columns)
-
-    print('Y: {}, lag: {}, pca贡献度: {}'.format(y_id, lag_num, pca.explained_variance_ratio_))
-    print('pca系数: {}'.format(pca_lag))
-
-    pca_lag_norm = pca_lag / pca_lag.sum().sum()
-    print('归一化后的pca系数: {}'.format(pca_lag_norm))
-
-    X_lag_result = pd.DataFrame(X_lag_std)
-    X_lag_result.columns = X_lag.columns
-    X_lag_result.index = X_lag.index
-
-    Y_predict = X_lag_result.dot(pca_lag_norm.T)
-    Y_predict.index = X_lag_result.index
-    X_lag_result[y_name + '_predict'] = Y_predict
-
-    X_lag_result[y_name + '_std'] = StandardScaler().fit_transform(pd.DataFrame(Y))
-    X_lag_result[y_name] = Y
-
-    print('Y: {}, lag: {}, result: {}'.format(y_id, lag_num, X_lag_result.head(3)))
-
-    return X_lag_result
-
-
 def clean_data(df, y_id):
-
-    # 将房价2010的数据用S2707403的数据补齐
-    col_new = 'S2707411'
-    df.loc['2010', col_new] = [12.83, 14.87, 11.97, 9.17]
 
     # 保留空值少于70%的列
     to_drop = df.columns[df.isnull().mean() > .7]
@@ -99,7 +33,7 @@ def clean_data(df, y_id):
     return df
 
 
-def preprocess(df, y_id, lag_num):
+def shift_down(df, y_id, lag_num):
     # 在数据后增加lag_num行
     for _ in range(lag_num):
         empty_row = pd.DataFrame([],
@@ -114,32 +48,61 @@ def preprocess(df, y_id, lag_num):
     df_x = df.drop(y_id, axis=1)
     df_x = df_x.shift(lag_num)
 
-    print('预处理后的X（头3行）: {}'.format(df_x.head(3)))
-    print('预处理后的Y（头3行）: {}'.format(df_y.head(3)))
+    print('向下移动{}行的X（头3行）: {}'.format(lag_num, df_x.head(3)))
+    print('未移动的Y（头3行）: {}'.format(df_y.head(3)))
     return df_x, df_y
 
 
-def corr_pca_lag(df_x, df_y, y_id, lag_num, corr_filter):
+def corr(df_x, df_y, y_id):
     # 只保留行中没有空值的行
     df_x_y = pd.concat([df_x, df_y], axis=1)
     df_x_y = df_x_y.loc[~df_x_y.isnull().sum(axis=1).astype(bool)]
 
     df_y_calc = df_x_y[y_id]
     df_x_calc = df_x_y.drop(y_id, axis=1)
-    print('计算相关性之前的df_X: {}'.format(df_x.head(3)))
-    print('计算相关性之前的X: {}'.format(df_x_calc.head(3)))
+    print('计算相关性的X: {}'.format(df_x_calc.head(3)))
 
-    corr = df_x_calc.corrwith(df_y_calc)
-    corr = corr.reset_index()
+    corr = pd.DataFrame(df_x_calc.corrwith(df_y_calc))
+    print('相关性系数: {}'.format(corr))
+    return corr
+
+
+def pick_feature_to_lag(df_x_dict, df_y, y_id, corr_filter):
+    # df_x_dict = {'lag1': df_x_lag1,
+    #              'lag2': df_x_lag2,
+    #              'lag3': df_x_lag3,
+    #              'lag4': df_x_lag4}
+    def helper(lag_name, df_x):
+        c = corr(df_x, df_y, y_id)
+        c.rename(columns={0: lag_name}, inplace=True)
+        return c
+    # 计算所有的x（lag1, lag2, lag3, lag4）与y的相关性
+    corr_all = pd.concat([helper(lag_name, df_x)
+                          for lag_name, df_x in df_x_dict.items()], axis=1)
 
     # 去掉相关性绝对值小于corr_filter（比如：0.6）的指标
-    corr_to_drop = corr[abs(corr[0]) < corr_filter]
-    df_x_calc.drop(corr_to_drop['index'], axis=1, inplace=True)
-    df_x.drop(corr_to_drop['index'], axis=1, inplace=True)
+    corr_all[corr_all.abs() < corr_filter] = np.nan
+    # 计算出相关性最大的那个lag
+    corr_all['lag'] = corr_all.abs().idxmax(axis=1)
 
-    for feature in corr[corr[0] <= -corr_filter]['index']:
-        df_x_calc[feature] *= -1
-        df_x[feature] *= -1
+    res = {}
+    for lag_name, df_x in df_x_dict.items():
+        # 只保留相关性最大的那个lag中的指标
+        df_x = df_x.loc[:, corr_all.loc[corr_all['lag'] == lag_name].index]
+        # 将相关性为负数的指标乘以-1
+        # df_x.loc[:, corr_all[lag_name] < 0] *= -1
+        res[lag_name] = df_x
+
+    return res
+
+
+def pca(df_x, df_y, y_id, lag_num):
+    # 只保留行中没有空值的行
+    df_x_y = pd.concat([df_x, df_y], axis=1)
+    df_x_y = df_x_y.loc[~df_x_y.isnull().sum(axis=1).astype(bool)]
+
+    df_y_calc = df_x_y[y_id]
+    df_x_calc = df_x_y.drop(y_id, axis=1)
 
     pca = PCA(n_components=1)
 
@@ -148,14 +111,15 @@ def corr_pca_lag(df_x, df_y, y_id, lag_num, corr_filter):
         df_x_std = StandardScaler().fit_transform(df_x_calc)
         pca.fit_transform(df_x_std)
         pca_lag = pd.DataFrame(pca.components_, columns=df_x_calc.columns)
+        break
 
-        pca_lag_t = pca_lag.T
-        cols_to_drop = [e for e in pca_lag_t[pca_lag_t[0] <= 0].index]
-        if not cols_to_drop:
-            break
-        print('以下列将被删除，因为他们的pca系数小于零: {}'.format(cols_to_drop))
-        df_x_calc.drop(cols_to_drop, axis=1, inplace=True)
-        df_x.drop(cols_to_drop, axis=1, inplace=True)
+        # pca_lag_t = pca_lag.T
+        # cols_to_drop = [e for e in pca_lag_t[pca_lag_t[0] <= 0].index]
+        # if not cols_to_drop:
+        #     break
+        # print('以下列将被删除，因为他们的pca系数小于零: {}'.format(cols_to_drop))
+        # df_x_calc.drop(cols_to_drop, axis=1, inplace=True)
+        # df_x.drop(cols_to_drop, axis=1, inplace=True)
 
     print('Y: {}, lag: {}, pca贡献度: {}'.format(y_id, lag_num, pca.explained_variance_ratio_))
     print('pca系数: {}'.format(pca_lag))
@@ -184,11 +148,12 @@ def corr_pca(df, start_month, end_month, y_id, corr_filter):
     df = df[start_month:end_month]
     df = clean_data(df, y_id)
 
-    def helper(lag_num):
-        df_x, df_y = preprocess(df, y_id, lag_num)
-        return corr_pca_lag(df_x, df_y, y_id, lag_num, corr_filter)
+    df_x_lags = {'lag{}'.format(lag_num): shift_down(df, y_id, lag_num)[0] for lag_num in range(1, 5)}
+    _, df_y = shift_down(df, y_id, 4)
+    df_x_lags = pick_feature_to_lag(df_x_lags, df_y, y_id, corr_filter)
 
-    result = pd.concat([helper(lag_num) for lag_num in range(1, 5)], axis=1)
+    result = pd.concat([pca(df_x_lags['lag{}'.format(lag_num)], df_y, y_id, lag_num) for lag_num in range(1, 5)],
+                       axis=1)
     return result.loc[:, ~result.columns.duplicated()]
 
 
@@ -252,31 +217,42 @@ def calc_reg(df_y, y_id):
 
 def draw_plot(df, y_id):
     x = df.index
-    y = df['Y_' + y_id]
-    y_std = df['Y_{}_std'.format(y_id)]
-    y_id_fmt = 'Y_lag{}_{}'
-    y1 = df[y_id_fmt.format(1, y_id)]
-    y2 = df[y_id_fmt.format(2, y_id)]
-    y3 = df[y_id_fmt.format(3, y_id)]
-    y4 = df[y_id_fmt.format(4, y_id)]
-    y_merged = df['Y_{}_merged'.format(y_id)]
 
+    f1 = plt.figure(1)
     # Plot y1 vs x in blue on the left vertical axis.
     # plt.xlabel("date")
     # plt.ylabel("", color="b")
     # plt.tick_params(axis="y", labelcolor="b")
     # plt.plot(x, y, "b-", linewidth=2)
-    plt.plot(x, y_std, "b-", linewidth=2)
-    #
-    # # Plot y2 vs x in red on the right vertical axis.
-    # plt.twinx()
-    # plt.ylabel("", color="r")
-    # plt.tick_params(axis="y", labelcolor="r")
-    plt.plot(x, y1, "g-", linewidth=1)
-    plt.plot(x, y2, "g-", linewidth=1)
-    plt.plot(x, y3, "g-", linewidth=1)
-    plt.plot(x, y4, "y-", linewidth=2)
-    # plt.plot(x, y_merged, "r-", linewidth=2)
+    y_std = df['Y_{}_std'.format(y_id)]
+    plt.plot(x, y_std, '-', linewidth=2, label='y_std')
+
+    y_id_fmt = 'Y_lag{}_{}'
+    y1 = df[y_id_fmt.format(1, y_id)]
+    y2 = df[y_id_fmt.format(2, y_id)]
+    y3 = df[y_id_fmt.format(3, y_id)]
+    y4 = df[y_id_fmt.format(4, y_id)]
+    plt.plot(x, y1, '-', linewidth=2, label='y1')
+    plt.plot(x, y2, '-', linewidth=2, label='y2')
+    plt.plot(x, y3, '-', linewidth=2, label='y3')
+    plt.plot(x, y4, '-', linewidth=2, label='y4')
+    plt.legend(loc='upper right')
+    ax = plt.gca()
+    ax.set_xticks(x)
+    plt.tick_params(axis='x', labelrotation=90)
+
+
+    f2 = plt.figure(2)
+    y = df['Y_' + y_id]
+    plt.plot(x, y, '-', linewidth=2, label='y')
+
+    y_merged = df['Y_{}_merged'.format(y_id)]
+    plt.plot(x, y_merged, '-', linewidth=2, label='y_merged')
+    plt.legend(loc='upper right')
+    ax = plt.gca()
+    ax.set_xticks(x)
+    plt.tick_params(axis='x', labelrotation=90)
+
     plt.show()
 
 
@@ -285,6 +261,12 @@ DATA_PATH = '/home/murray/git/ipynb/alldata.xlsx'
 X_orig = pd.read_excel(DATA_PATH, index_col=[0])
 X_orig.drop('指标ID', axis=1, inplace=True)
 X_orig.drop('S0033812', axis=1, inplace=True)  # S0033812有多个空值
+
+# 将房价2010的数据用S2707403的数据补齐
+col_new = 'S2707411'
+X_orig.loc['2009', col_new] = [-1.7, -1.2, 1.5, 6.43]
+X_orig.loc['2010', col_new] = [12.83, 14.87, 11.97, 9.17]
+
 
 Y_IDS = [
     # 'M5567876',
@@ -301,7 +283,7 @@ for y_id in Y_IDS:
         X[y_id] = X[y1_id] / X[y2_id]
         X.drop(y1_id, axis=1, inplace=True)
         X.drop(y2_id, axis=1, inplace=True)
-    df_y = corr_pca(X, '2010-03', '2018-12', y_id, 0.6)
+    df_y = corr_pca(X, '2009-03', '2018-12', y_id, 0.7)
     print('Y: {}, lag1234合并结果: {}'.format(y_id, df_y.head(3)))
 
     df_y_reg = calc_reg(df_y, y_id)
