@@ -1,11 +1,13 @@
+import math
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scipy.stats import norm
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.preprocessing import StandardScaler
-
-import matplotlib.pyplot as plt
 
 # pd.set_option('display.height', 10000)
 pd.set_option('display.max_rows', 10000)
@@ -14,7 +16,6 @@ pd.set_option('display.max_columns', 10000)
 
 
 def clean_data(df, y_id):
-
     # 保留空值少于70%的列
     to_drop = df.columns[df.isnull().mean() > .7]
     print('以下列将被去除，因为它们的空值超过70%: {}'.format(to_drop))
@@ -76,6 +77,7 @@ def pick_feature_to_lag(df_x_dict, df_y, y_id, corr_filter):
         c = corr(df_x, df_y, y_id)
         c.rename(columns={0: lag_name}, inplace=True)
         return c
+
     # 计算所有的x（lag1, lag2, lag3, lag4）与y的相关性
     corr_all = pd.concat([helper(lag_name, df_x)
                           for lag_name, df_x in df_x_dict.items()], axis=1)
@@ -215,6 +217,22 @@ def calc_reg(df_y, y_id):
     return result
 
 
+def probability_transform(df_y, y_id):
+    y_name = 'Y_{}'.format(y_id)
+    mean_value = df_y[y_name].mean()
+    std_value = df_y[y_name].std()
+
+    max_value = math.ceil(mean_value + 4 * std_value)
+    min_value = math.floor(mean_value - 4 * std_value)
+    y_merged_name = 'Y_{}_merged'.format(y_id)
+    scale_trans = 100 - round(
+        100 * (df_y.loc[~df_y[y_merged_name].isnull(), y_merged_name] - min_value) / (max_value - min_value),
+        2
+    )
+    return pd.DataFrame(norm.cdf((scale_trans - scale_trans.mean()) / scale_trans.std()),
+                        index=df_y[4:].index, columns=[y_name + '_prob_trans'])
+
+
 def draw_plot(df, y_id):
     x = df.index
 
@@ -241,7 +259,6 @@ def draw_plot(df, y_id):
     ax.set_xticks(x)
     plt.tick_params(axis='x', labelrotation=90)
 
-
     f2 = plt.figure(2)
     y = df['Y_' + y_id]
     plt.plot(x, y, '-', linewidth=2, label='y')
@@ -253,43 +270,58 @@ def draw_plot(df, y_id):
     ax.set_xticks(x)
     plt.tick_params(axis='x', labelrotation=90)
 
+    f3 = plt.figure(3)
+    y_prob_trans = df['Y_{}_prob_trans'.format(y_id)]
+    plt.plot(x, y_prob_trans, '-', linewidth=2, label='y_prob_trans')
+
+    plt.legend(loc='upper right')
+    ax = plt.gca()
+    ax.set_xticks(x)
+    plt.tick_params(axis='x', labelrotation=90)
+
     plt.show()
 
 
-DATA_PATH = '/home/murray/git/ipynb/alldata.xlsx'
+if __name__ == '__main__':
 
-X_orig = pd.read_excel(DATA_PATH, index_col=[0])
-X_orig.drop('指标ID', axis=1, inplace=True)
-X_orig.drop('S0033812', axis=1, inplace=True)  # S0033812有多个空值
+    DATA_PATH = '/home/murray/git/ipynb/alldata.xlsx'
 
-# 将房价2010的数据用S2707403的数据补齐
-col_new = 'S2707411'
-X_orig.loc['2009', col_new] = [-1.7, -1.2, 1.5, 6.43]
-X_orig.loc['2010', col_new] = [12.83, 14.87, 11.97, 9.17]
+    X_orig = pd.read_excel(DATA_PATH, index_col=[0])
+    X_orig.drop('指标ID', axis=1, inplace=True)
+    X_orig.drop('S0033812', axis=1, inplace=True)  # S0033812有多个空值
 
+    # 将房价2010的数据用S2707403的数据补齐
+    col_new = 'S2707411'
+    X_orig.loc['2009', col_new] = [-1.7, -1.2, 1.5, 6.43]
+    X_orig.loc['2010', col_new] = [12.83, 14.87, 11.97, 9.17]
 
-Y_IDS = [
-    # 'M5567876',
-    # 'M0001548_M5567876',
-    # # 'M1000216',
-    'S2707411',
-    # 'M0010049',
-]
+    Y_IDS = [
+        # 'M5567876',
+        # 'M0001548_M5567876',
+        # # 'M1000216',
+        # 'S2707411',
+        'M0010049',
+    ]
 
-for y_id in Y_IDS:
-    X = X_orig.copy()
-    if '_' in y_id:
-        y1_id, y2_id = y_id.split('_')
-        X[y_id] = X[y1_id] / X[y2_id]
-        X.drop(y1_id, axis=1, inplace=True)
-        X.drop(y2_id, axis=1, inplace=True)
-    df_y = corr_pca(X, '2009-03', '2018-12', y_id, 0.7)
-    print('Y: {}, lag1234合并结果: {}'.format(y_id, df_y.head(3)))
+    for y_id in Y_IDS:
+        X = X_orig.copy()
+        if '_' in y_id:
+            y1_id, y2_id = y_id.split('_')
+            X[y_id] = X[y1_id] / X[y2_id]
+            X.drop(y1_id, axis=1, inplace=True)
+            X.drop(y2_id, axis=1, inplace=True)
+        df_y = corr_pca(X, '2009-03', '2018-12', y_id, 0.7)
+        print('Y: {}, lag1234合并结果: {}'.format(y_id, df_y.head(3)))
 
-    df_y_reg = calc_reg(df_y, y_id)
-    df_y = pd.concat([df_y, df_y_reg], axis=1)
-    df_y = df_y.loc[:, ~df_y.columns.duplicated()]
-    print('Y: {}, 线性回归后的Y: {}'.format(y_id, df_y))
-    y_name = 'Y_' + y_id
-    df_y.loc[:, ~df_y.columns.duplicated()].to_csv('./{}.csv'.format(y_name))
-    draw_plot(df_y, y_id)
+        df_y_reg = calc_reg(df_y, y_id)
+        df_y = pd.concat([df_y, df_y_reg], axis=1)
+        df_y = df_y.loc[:, ~df_y.columns.duplicated()]
+        print('Y: {}, 线性回归后的Y: {}'.format(y_id, df_y))
+
+        df_y_prob_trans = probability_transform(df_y, y_id)
+        df_y = pd.concat([df_y, df_y_prob_trans], axis=1)
+        print('Y: {}, Probability Transformation之后的Y: {}'.format(y_id, df_y))
+
+        y_name = 'Y_' + y_id
+        df_y.loc[:, ~df_y.columns.duplicated()].to_csv('./{}.csv'.format(y_name))
+        draw_plot(df_y, y_id)
